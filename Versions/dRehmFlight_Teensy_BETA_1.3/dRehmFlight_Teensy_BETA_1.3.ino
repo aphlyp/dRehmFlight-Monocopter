@@ -74,6 +74,7 @@ static const uint8_t num_DSM_channels = 6; //If using DSM RX, change this to mat
 #include <SPI.h>      //SPI communication
 #include <PWMServo.h> //Commanding any extra actuators, installed with teensyduino installer
 #include <FastLED.h>
+#include <SD.h>
 
 #if defined USE_SBUS_RX
 #include "src/SBUS/SBUS.h"   //sBus interface
@@ -180,12 +181,12 @@ float MagScaleZ = 1.0;
 
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = 0.05;
-float AccErrorY = 0.01;
-float AccErrorZ = 0.08;
-float GyroErrorX = -2.85;
-float GyroErrorY = 0.12;
-float GyroErrorZ = 5.12;
+float AccErrorX = 0.00;
+float AccErrorY = -0.02;
+float AccErrorZ = 0.06;
+float GyroErrorX = -0.86;
+float GyroErrorY = -1.17;
+float GyroErrorZ = 0.21;
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 
 
@@ -324,6 +325,11 @@ int m1_command_PWM, m2_command_PWM, m3_command_PWM, m4_command_PWM, m5_command_P
 float s1_command_scaled, s2_command_scaled, s3_command_scaled, s4_command_scaled, s5_command_scaled, s6_command_scaled, s7_command_scaled;
 int s1_command_PWM, s2_command_PWM, s3_command_PWM, s4_command_PWM, s5_command_PWM, s6_command_PWM, s7_command_PWM;
 
+//SD Card
+const int chipSelect = BUILTIN_SDCARD; // Set the chip select pin
+float datawriteseconds = 1.0 / 100; // Set the time interval between data writes
+int SD_flag = 1; // Initialize SD flag to 1
+int fileNum; // Store the file number
 
 //Servo centered positions
 float RUDDER1 = 0.5;
@@ -429,9 +435,71 @@ void setup() {
   //If using MPU9250 IMU, uncomment for one-time magnetometer calibration (may need to repeat for new locations)
   //calibrateMagnetometer(); //Generates magentometer error and scale factors to be pasted in user-specified variables section
 
+  Serial.print("Initializing SD card...");
+  if (!SD.begin(chipSelect)) { // Check if SD card is present and can be initialized
+    Serial.println("Card failed, or not present");
+    SD_flag = 0; // Set SD flag to 0 if card is not present
+  }
+  else {
+    Serial.println("card initialized.");
+    SD_flag = 1; // Set SD flag to 1 if card is present
+  }
+  
+  if (SD_flag == 1) {
+    // Read last file number from file
+    File fileNumFile = SD.open("fileNum.txt", FILE_READ);
+    if (fileNumFile) {
+      String fileNumString = fileNumFile.readStringUntil('\n');
+      fileNum = fileNumString.toInt();
+      fileNum++;
+      fileNumFile.close();
+    }
+    else {
+      // If fileNum.txt doesn't exist, start with 1
+      fileNum = 1;
+    }
+
+    // Find next available file number
+    int maxFileNum = 999;
+    bool foundFile = false;
+    while (!foundFile && fileNum <= maxFileNum) {
+      String fileName = "datalog" + String(fileNum) + ".txt";
+      if (!SD.exists(fileName.c_str())) {
+        foundFile = true;
+      }
+      else {
+        fileNum++;
+      }
+    }
+
+    if (!foundFile) {
+      Serial.println("error: maximum number of files reached");
+    }
+    else {
+      // Write new file number to file
+      File newFileNumFile = SD.open("fileNum.txt", FILE_WRITE);
+      if (newFileNumFile) {
+        newFileNumFile.println(fileNum);
+        newFileNumFile.close();
+      }
+      else {
+        Serial.println("error opening fileNum.txt");
+      }
+
+      // Open the file for writing
+      String fileName = "datalog" + String(fileNum) + ".txt";
+      File dataFile = SD.open(fileName.c_str(), FILE_WRITE);
+      if (dataFile) {
+        // Write data to file
+        dataFile.println("data goes here");
+        dataFile.close();
+      }
+      else {
+        Serial.println("error opening " + fileName);
+      }
+    }
+  }
 }
-
-
 
 //========================================================================================================================//
 //                                                       MAIN LOOP                                                        //
@@ -480,6 +548,10 @@ void loop() {
   getCommands(); //Pulls current available radio commands
   failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
   loopRate(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
+
+  if (SD_flag == 1) { // Only write data to SD card if the card is present
+    SDcard(); // Call the function to write data to SD card
+  }
 }
 
 
@@ -532,12 +604,12 @@ void armedStatus() {
 
 void harderAngles() {
   if (channel_6_pwm > 1500) {
-    maxRoll = 15.0;
-    maxPitch = 15.0;
+    maxRoll = 30.0;
+    maxPitch = 30.0;
   }
   else {
-    maxRoll = 7.0;
-    maxPitch = 7.0;
+    maxRoll = 15.0;
+    maxPitch = 15.0;
   }
 }
 void IMUinit() {
@@ -1225,8 +1297,8 @@ void getCommands() {
     float bias  = 800.0;
 
     // RadioLink AT10 Stick mode 1
-    channel_1_pwm = sbusChannels[1] * scale + bias;
-    channel_2_pwm = sbusChannels[0] * scale + bias;
+    channel_1_pwm = sbusChannels[0] * scale + bias;
+    channel_2_pwm = sbusChannels[1] * scale + bias;
     channel_3_pwm = sbusChannels[2] * scale + bias;
     channel_4_pwm = sbusChannels[3] * scale + bias;
     channel_5_pwm = sbusChannels[4] * scale + bias;
@@ -1751,6 +1823,51 @@ void printLoopRate() {
     print_counter = micros();
     Serial.print(F("dt:"));
     Serial.println(dt * 1000000.0);
+  }
+}
+
+void SDcard() { // Function to write data to SD card
+  int drwitemicros = datawriteseconds * 1e6; // Calculate the time interval between data writes in microseconds
+
+  if (current_time - print_counter > drwitemicros) { // Check if it's time to write data to SD card
+    print_counter = micros(); // Reset the counter
+
+    // Open the file for writing with the new file name
+    String fileName = "datalog" + String(fileNum) + ".txt";
+    File dataFile = SD.open(fileName.c_str(), FILE_WRITE);
+    String dataString = ""; // Initialize an empty string to store data
+
+    // Append sensor data to the data string(we can add variables to store as needed here)
+    dataString += String(current_time / 1e6);
+    dataString += ",";
+    dataString += String(roll_IMU);
+    dataString += ",";
+    dataString += String(pitch_IMU);
+    dataString += ",";
+    dataString += String(yaw_IMU);
+    dataString += ",";
+    dataString += String(GyroX);
+    dataString += ",";
+    dataString += String(GyroY);
+    dataString += ",";
+    dataString += String(GyroZ);
+    dataString += ",";
+    dataString += String(AccX);
+    dataString += ",";
+    dataString += String(AccY);
+    dataString += ",";
+    dataString += String(AccZ);
+    
+    if (dataFile) { // Check if file is available for writing
+      dataFile.println(dataString); // Write data to file
+      dataFile.close(); // Close the file
+      
+      // Print data to serial monitor (uncomment if desired)
+      // Serial.println(dataString);
+    }
+    else {
+      Serial.println("error opening datalog.txt"); // Print an error message if file cannot be opened
+    }
   }
 }
 
